@@ -1,0 +1,128 @@
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const mongoose = require('mongoose');
+const rateLimit = require('express-rate-limit');
+const alertCron = require('./jobs/alertCron');
+
+const authRoutes = require('./routes/auth');
+const tripRoutes = require('./routes/trips');
+const routeRoutes = require('./routes/routes');
+const facilityRoutes = require('./routes/facilities');
+const alertRoutes = require('./routes/alerts');
+const mlRoutes = require('./routes/ml');
+const feedbackRoutes = require('./routes/feedback');
+const errorHandler = require('./middleware/errorHandler');
+
+const app = express();
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5000',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    if (origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    return callback(null, true);
+  },
+  credentials: true
+}));
+
+app.use(express.json({ limit: '500kb' }));
+
+app.use(express.urlencoded({ extended: true }));
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 150,
+  message: { error: 'Too many requests, please try again later.' }
+});
+app.use('/api/', limiter);
+
+// Serverless-friendly cached DB connection
+let cachedDbPromise = null;
+async function ensureDbConnected() {
+  if (mongoose.connection.readyState === 1) return;
+  if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is not set.');
+  if (!cachedDbPromise) {
+    cachedDbPromise = mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS: 5000,
+      bufferCommands: false
+    }).then(() => {
+      console.log('✓ MongoDB connected');
+      alertCron.start();
+    }).catch(err => {
+      cachedDbPromise = null;
+      throw err;
+    });
+  }
+  await cachedDbPromise;
+}
+
+// Ensure DB is connected before handling API routes
+app.use('/api', async (req, res, next) => {
+  if (req.path === '/health') {
+    return next();
+  }
+  // Allow route calculation and ML analysis to proceed even if DB is still connecting
+  if (req.path.startsWith('/routes') || req.path.startsWith('/ml') || req.path.startsWith('/facilities')) {
+    ensureDbConnected().catch(() => {});
+    return next();
+  }
+  try {
+    await ensureDbConnected();
+    next();
+  } catch (e) {
+    console.error('[DB Error]', e.message);
+    return res.status(503).json({
+      error: 'Database connection failed: ' + e.message + '. Please ensure 0.0.0.0/0 is added to your MongoDB Atlas IP Access List.'
+    });
+  }
+});
+
+// Mount Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/trips', tripRoutes);
+app.use('/api/routes', routeRoutes);
+app.use('/api/facilities', facilityRoutes);
+app.use('/api/alerts', alertRoutes);
+app.use('/api/ml', mlRoutes);
+app.use('/api/feedback', feedbackRoutes);
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'connecting',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Error handler MUST be last
+app.use(errorHandler);
+
+const PORT = process.env.PORT || 5000;
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`\n◉ NER SmartLogix backend running on http://localhost:${PORT}`);
+    ensureDbConnected();
+  });
+}
+
+module.exports = app;

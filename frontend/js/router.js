@@ -1,0 +1,62 @@
+// NER SmartLogix — Router
+
+import { state } from './state.js';
+
+export async function go(page) {
+  // If navigating away from Live Network, cleanly destroy map instance
+  if (state.page === 'Live Network' && page !== 'Live Network') {
+    try {
+      const { destroyMap } = await import('./maps.js');
+      destroyMap();
+    } catch (_) {}
+  }
+
+  // Auth guard for My Trip
+  if (page === 'My Trip' && !state.user) {
+    window.openAuth('login');
+    import('./render.js').then(m => m.notify('Please login to view your trips.', 'error'));
+    return;
+  }
+  state.page = page;
+  state.menu = false;
+  if (page === 'Alerts' && (!state.top10Alerts || state.top10Alerts.length === 0)) {
+    state.loadingAlerts = true;
+  }
+  await window.render();
+
+  // Trigger page-specific data loading
+  if (page === 'Plan Trip') {
+    import('./pages/plan.js').then(m => m.initPlanPage && m.initPlanPage());
+  }
+  if (page === 'My Trip' && state.user) {
+    import('./pages/mytrip.js').then(m => m.loadMyTrips());
+  }
+  if (page === 'Alerts') {
+    import('./pages/alerts.js').then(m => m.loadTop10Alerts());
+  }
+  if (page === 'Live Network') {
+    import('./pages/live.js').then(m => m.initLiveNetwork());
+  }
+  if (page === 'Facilities') {
+    import('./pages/facilities.js').then(m => m.loadFacilitiesPage());
+  }
+}
+
+
+window.go = go;
+
+export function changeLang(lang) {
+  import('./state.js').then(({ saveLang }) => saveLang(lang));
+  import('./i18n.js').then(async ({ loadLocale }) => {
+    await loadLocale(lang);
+    window.render();
+    // Save to backend if logged in
+    if (state.token) {
+      import('./api.js').then(({ api }) => {
+        api.updateLanguage(lang, state.token).catch(() => {});
+      });
+    }
+  });
+}
+
+window.changeLang = changeLang;
